@@ -1368,6 +1368,14 @@ func getIsExcluded(excludePatterns []*regexp2.Regexp) func(*ast.SourceFile) bool
 	}
 }
 
+// getIsFileExcluded returns a function that checks if a source file should be excluded from auto-imports
+func getIsFileExcluded(host Host, preferences *UserPreferences) func(*ast.SourceFile) bool {
+	if len(preferences.AutoImportFileExcludePatterns) == 0 {
+		return func(*ast.SourceFile) bool { return false }
+	}
+	return getIsExcluded(getIsExcludedPatterns(preferences, host.UseCaseSensitiveFileNames()))
+}
+
 func forEachExternalModuleToImportFrom(
 	ch *checker.Checker,
 	program *compiler.Program,
