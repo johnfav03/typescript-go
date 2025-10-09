@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dlclark/regexp2"
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/astnav"
 	"github.com/microsoft/typescript-go/internal/binder"
@@ -19,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/modulespecifiers"
 	"github.com/microsoft/typescript-go/internal/stringutil"
 	"github.com/microsoft/typescript-go/internal/tspath"
+	"github.com/microsoft/typescript-go/internal/vfs"
 )
 
 type SymbolExportInfo struct {
@@ -1328,20 +1330,61 @@ func getDefaultLikeExportNameFromDeclaration(symbol *ast.Symbol) string {
 	return ""
 }
 
+// getIsExcludedPatterns converts autoImportFileExcludePatterns to regexes
+func getIsExcludedPatterns(preferences *UserPreferences, useCaseSensitiveFileNames bool) []*regexp2.Regexp {
+	if len(preferences.AutoImportFileExcludePatterns) == 0 {
+		return nil
+	}
+	
+	patterns := make([]*regexp2.Regexp, 0, len(preferences.AutoImportFileExcludePatterns))
+	for _, spec := range preferences.AutoImportFileExcludePatterns {
+		// The client is expected to send rooted path specs since we don't know
+		// what directory a relative path is relative to.
+		pattern := vfs.GetPatternFromSpec(spec, "", "exclude")
+		if pattern != "" {
+			patterns = append(patterns, vfs.GetRegexFromPattern(pattern, useCaseSensitiveFileNames))
+		}
+	}
+	return patterns
+}
+
+// getIsExcluded returns a function that checks if a source file is excluded by the patterns
+func getIsExcluded(excludePatterns []*regexp2.Regexp) func(*ast.SourceFile) bool {
+	if len(excludePatterns) == 0 {
+		return func(*ast.SourceFile) bool { return false }
+	}
+	
+	return func(sourceFile *ast.SourceFile) bool {
+		fileName := sourceFile.FileName()
+		for _, pattern := range excludePatterns {
+			match, err := pattern.MatchString(fileName)
+			if err == nil && match {
+				return true
+			}
+		}
+		// Note: TypeScript also checks for symlinks, but we're simplifying for now
+		// as the Go implementation doesn't appear to have symlink cache support yet
+		return false
+	}
+}
+
 func forEachExternalModuleToImportFrom(
 	ch *checker.Checker,
 	program *compiler.Program,
 	preferences *UserPreferences,
+	useCaseSensitiveFileNames bool,
 	// useAutoImportProvider bool,
 	cb func(module *ast.Symbol, moduleFile *ast.SourceFile, checker *checker.Checker, isFromPackageJson bool),
 ) {
-	// !!! excludePatterns
-	// excludePatterns := preferences.autoImportFileExcludePatterns && getIsExcludedPatterns(preferences, useCaseSensitiveFileNames)
+	var excludePatterns []*regexp2.Regexp
+	if len(preferences.AutoImportFileExcludePatterns) > 0 {
+		excludePatterns = getIsExcludedPatterns(preferences, useCaseSensitiveFileNames)
+	}
 
 	forEachExternalModule(
 		ch,
 		program.GetSourceFiles(),
-		// !!! excludePatterns,
+		excludePatterns,
 		func(module *ast.Symbol, file *ast.SourceFile) {
 			cb(module, file, ch, false)
 		},
@@ -1370,19 +1413,33 @@ func forEachExternalModuleToImportFrom(
 func forEachExternalModule(
 	ch *checker.Checker,
 	allSourceFiles []*ast.SourceFile,
-	// excludePatterns []RegExp,
+	excludePatterns []*regexp2.Regexp,
 	cb func(moduleSymbol *ast.Symbol, sourceFile *ast.SourceFile),
 ) {
-	// !!! excludePatterns
-	// isExcluded := excludePatterns && getIsExcluded(excludePatterns, host)
+	isExcluded := getIsExcluded(excludePatterns)
 
 	for _, ambient := range ch.GetAmbientModules() {
-		if !strings.Contains(ambient.Name, "*") /*  && !(excludePatterns && ambient.Declarations.every(func (d){ return isExcluded(d.getSourceFile())})) */ {
-			cb(ambient, nil /*sourceFile*/)
+		if !strings.Contains(ambient.Name, "*") {
+			// Check if all declarations are excluded
+			allExcluded := true
+			if excludePatterns != nil && ambient.Declarations != nil {
+				for _, d := range ambient.Declarations {
+					if sf := ast.GetSourceFileOfNode(d); sf != nil && !isExcluded(sf) {
+						allExcluded = false
+						break
+					}
+				}
+			} else {
+				allExcluded = false
+			}
+			
+			if !allExcluded {
+				cb(ambient, nil /*sourceFile*/)
+			}
 		}
 	}
 	for _, sourceFile := range allSourceFiles {
-		if ast.IsExternalOrCommonJSModule(sourceFile) /* && !isExcluded(sourceFile) */ {
+		if ast.IsExternalOrCommonJSModule(sourceFile) && !isExcluded(sourceFile) {
 			cb(ch.GetMergedSymbol(sourceFile.Symbol), sourceFile)
 		}
 	}
