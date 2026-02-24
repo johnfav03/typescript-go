@@ -9164,7 +9164,9 @@ func (node *JsxNamespacedName) ForEachChild(v Visitor) bool {
 }
 
 func (node *JsxNamespacedName) VisitEachChild(v *NodeVisitor) *Node {
-	return v.Factory.UpdateJsxNamespacedName(node, v.visitNode(node.name), v.visitNode(node.Namespace))
+	namespace := v.visitNode(node.Namespace)
+	name := v.visitNode(node.name)
+	return v.Factory.UpdateJsxNamespacedName(node, name, namespace)
 }
 
 func (node *JsxNamespacedName) Clone(f NodeFactoryCoercible) *Node {
